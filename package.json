@@ -1,0 +1,23 @@
+{
+  "name": "web3d-agent-cli",
+  "version": "0.1.0",
+  "description": "面向 Three.js 与 Python 后端的规则驱动编程智能体 CLI",
+  "type": "module",
+  "bin": { "web3d-agent": "dist/src/cli.js" },
+  "files": ["dist/src", "docs", "README.md", "LICENSE"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/src/cli.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "license": "MIT"
+}

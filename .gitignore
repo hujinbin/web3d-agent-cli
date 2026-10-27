@@ -1,4 +1,11 @@
 # Byte-compiled / optimized / DLL files
+node_modules/
+dist/
+.web3d-agent/sessions/
+.env
+.env.local
+.env.*.local
+
 __pycache__/
 *.py[codz]
 *$py.class
