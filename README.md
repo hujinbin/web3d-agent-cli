@@ -1,6 +1,8 @@
 # Web3D Agent CLI
 
-面向 **Three.js 3D 应用与 Python 后端**的编程智能体终端工具。使用 TypeScript 实现，自行维护模型调用、工具执行、项目规则和会话；参考 Claude Code 的执行循环思路，未复制其实现代码。
+面向 **Three.js 3D 应用与 Python 后端**的编程智能体终端工具。基于 **DeepSeek Harness（DSH）** 的 AgentLoop、模型适配、会话投影和工具运行时，使用 TypeScript 实现终端交互、兼容 OpenAI 的接口、项目规则和工作区工具。
+
+当前版本为 `0.2.0`，固定使用 DSH 核心插件 `0.2.1-rc.5` 与 Cordis `4.0.5`。通过嵌入核心插件启动运行时，`run`、`chat` 和离线演示均由 DSH 调度模型与工具。DSH 的接口随预览版本变化，依赖版本与锁文件一起维护。[DSH 官方仓库](https://github.com/deepseek-ai/deepseek-harness)
 
 ```text
 web3d › 检查模型切换后 GPU 内存持续增长的问题，修复并运行现有检查
@@ -43,8 +45,10 @@ web3d-agent chat -C E:\github\your-web3d-project
 
 ## 已实现的能力
 
+- DSH 驱动的模型与工具循环，工具串行执行，终止前等待当前执行收敛。
 - 交互式对话和单次任务；流式文本输出，工具参数完整组装后才执行。
 - 自定义模型、Base URL、密钥环境变量；可切换非流式 JSON。
+- DeepSeek 思考内容 `reasoning_content` 的 JSON / SSE 采集、历史回传和会话恢复。
 - 7 个内置工具：列目录、读文件、文字搜索、写文件、精确编辑、命令执行、项目启发式检查。
 - Three.js、Python 后端和通用工程三组内置规则，加上目标项目的 `AGENTS.md` 与补充规则。
 - `ask`、`auto-edit`、`plan` 模式，文件编辑和命令执行分别授权。
@@ -52,6 +56,27 @@ web3d-agent chat -C E:\github\your-web3d-project
 - 项目内会话持久化、恢复与取消，工具调用和结果配对保存。
 - 请求超时、命令超时、输出大小、模型调用轮次和上下文字符预算。
 - 不需要模型或网络的演示模式，以及本地 HTTP 模拟服务测试。
+- `check` / `check --json` 本地项目诊断，以及 `doctor --json` 运行时与配置报告。
+
+## 检查项目与 DSH 配置
+
+```powershell
+# 直接检查现有 Three.js / Python 源码
+web3d-agent check -C E:\github\your-web3d-project
+web3d-agent check -C E:\github\your-web3d-project --json
+
+# 查看实际安装的 DSH 版本、接口配置和规则来源
+web3d-agent doctor -C E:\github\your-web3d-project --json
+
+# 使用 DSH 和离线脚本体验工具执行
+web3d-agent run "检查项目结构和前后端隐患" -C E:\github\your-web3d-project --demo --json
+```
+
+`check` 可以直接运行。报告包括实际读取的源码数量、跳过原因、采样上限，以及带有 `code`、`file`、`line`、`evidence` 的检查建议。例如 `threejs.cleanup-review` 对每个含动画调用的 Three.js 文件核查显式清理线索，`python.async-blocking-review` 提示同一文件内的异步定义与阻塞调用。
+
+诊断的 `level` 为 `review`，需要结合资源所有权、框架生命周期和实际调用路径判断。`limits` 与 `coverage` 说明扫描范围，`truncated` 标记被省略的明细。`doctor --json` 返回 DSH 版本、Node 版本、模型地址、密钥是否已设置和规则来源。
+
+依赖通过 `overrides.zod = "4.6.7"` 覆盖 DSH 预览包固定的旧版本。`package-lock.json` 锁定开发环境，构建时使用 esbuild 将 DSH 与修复后的 Zod 编入 CLI 入口。发布后的命令通过 Node.js 执行，构建验证包含独立目录运行。
 
 ## 任务示例
 
@@ -68,7 +93,7 @@ web3d-agent run "为模型列表 API 补充输入验证，运行已有测试" --
 # 让模型维护前后端契约
 web3d-agent run "检查场景模型字段与 Python 响应模型是否一致，修复类型和空值处理"
 
-# 自动化集成：每行一个 JSON 事件，无法询问时拒绝未授权动作
+# 自动化集成，每行一个 JSON 事件，无法询问时拒绝未授权动作
 web3d-agent run "检查当前项目" --mode plan --json
 
 # 接口不支持 SSE 时
@@ -177,9 +202,9 @@ npm test
 npm pack --dry-run
 ```
 
-测试覆盖工具调用配对、审批、取消、上下文边界、SSE 工具参数分片、接口截断、路径边界、文件过期、规则加载、会话恢复与 CLI 离线贯通。API 测试使用本机 HTTP 假服务，不需要真实密钥。Windows 中创建文件符号链接需要权限，相应测试无法创建时明确跳过；目录 junction 边界另有测试。
+测试覆盖真实 DSH 运行时中的工具调用配对、审批、取消、上下文边界，以及 SSE 工具参数分片、思考内容回传、接口截断、路径边界、文件过期、规则加载、会话恢复与 CLI 贯通。API 测试使用本机 HTTP 假服务。Windows 中创建文件符号链接需要权限，相应测试无法创建时明确跳过。目录 junction 边界另有测试。
 
-当前版本未包含浏览器控制、3D 画面预览、MCP、子代理调度和自动摘要。它可以借助已批准命令运行目标项目自己的测试，但不会自动获得视觉验证能力。
+本次挂载的 DSH 服务负责 Agent 循环、LLM、会话、投影、系统提示词和工具。终端可以通过批准后的命令运行目标项目自己的构建与测试。浏览器、WebGL 画面等验证以实际工具执行结果为准。
 
 架构说明见 [docs/architecture.md](docs/architecture.md)。
 

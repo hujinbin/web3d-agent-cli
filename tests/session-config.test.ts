@@ -29,6 +29,28 @@ test('拒绝未配对工具调用及无对应调用的结果', () => {
   assert.throws(() => validateMessages([{ role: 'assistant', content: null, tool_calls: [{ id: 'x', type: 'function', function: { name: 'test', arguments: '{}' } }] }]), /未完成/);
 });
 
+test('旧会话缺省思考字段仍可恢复，新会话保留空与非空思考字段', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-reasoning-session-'));
+  try {
+    const session = createSession(root);
+    session.messages.push(
+      { role: 'user', content: '检查项目' },
+      { role: 'assistant', content: '旧版本消息' },
+      { role: 'assistant', content: '允许空思考', reasoning_content: null },
+      { role: 'assistant', content: '允许空字符串', reasoning_content: '' },
+      { role: 'assistant', content: '完成', reasoning_content: '保存完整协议内容。' },
+    );
+    await saveSession(session);
+    const restored = await readSession(root, session.id);
+    assert.deepEqual(restored.messages, session.messages);
+    assert.equal(Object.hasOwn(restored.messages[1]!, 'reasoning_content'), false);
+    assert.throws(() => validateMessages([{ role: 'assistant', content: '结果', reasoning_content: 42 }]), /思考内容格式/);
+    assert.throws(() => validateMessages([{ role: 'user', content: '输入', reasoning_content: '角色不匹配' }]), /思考内容格式/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('配置遵循环境与显式覆盖顺序，拒绝非法数值和未知字段', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-config-'));
   const previous = process.env.WEB3D_MODEL;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,22 @@ import test from 'node:test';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+
+test('构建后的 CLI 可以在无项目依赖的独立目录使用 DSH 完成任务', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-standalone-'));
+  try {
+    const standalone = path.join(root, 'web3d-agent.mjs');
+    await copyFile(cli, standalone);
+    await writeFile(path.join(root, 'scene.ts'), "import * as THREE from 'three';\nrequestAnimationFrame(render);\n");
+    const launch = (...args: string[]) => exec(process.execPath, [standalone, '-C', root, ...args], {
+      timeout: 20_000, encoding: 'utf8', cwd: root, env: { ...process.env, NODE_PATH: '' },
+    });
+    assert.equal(JSON.parse((await launch('doctor', '--json')).stdout).runtime.version, '0.2.1-rc.5');
+    const events = (await launch('run', '检查项目', '--demo', '--json')).stdout.trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(events.at(-1).reason, 'completed');
+    assert.deepEqual(events.filter(event => event.type === 'tool_start').map(event => event.name), ['list_files', 'check_project']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('CLI 初始化、JSONL 离线演示和会话恢复贯通', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-cli-'));
@@ -32,7 +48,45 @@ test('CLI 初始化、JSONL 离线演示和会话恢复贯通', async () => {
     const session = JSON.parse(await readFile(path.join(root, '.web3d-agent', 'sessions', `${id}.json`), 'utf8'));
     assert.equal(session.messages.filter((message: { role: string }) => message.role === 'user').length, 2);
     assert.match((await launch('rules')).stdout, /Three.js 场景开发规则/);
-    assert.match((await launch('doctor')).stdout, /未调用模型/);
+    assert.match((await launch('doctor')).stdout, /DeepSeek Harness 0\.2\.1-rc\.5/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('本地 check 无需模型配置，JSON 与文本均返回实际逐文件诊断', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-cli-check-'));
+  try {
+    await writeFile(path.join(root, 'scene.ts'), "import * as THREE from 'three';\nconst renderer = new THREE.WebGLRenderer();\nrequestAnimationFrame(render);\n");
+    await writeFile(path.join(root, 'backend.py'), 'async def load():\n    return requests.get(url)\n');
+    await writeFile(path.join(root, 'web3d-agent.json'), 'invalid config should not prevent a local source check');
+    const launch = (...args: string[]) => exec(process.execPath, [cli, '-C', root, 'check', ...args], { timeout: 20_000, encoding: 'utf8' });
+    const report = JSON.parse((await launch('--json')).stdout);
+    assert.equal(report.schemaVersion, 1);
+    assert.equal(report.summary.scannedFiles, 2);
+    assert.equal(report.summary.skippedFiles, 0);
+    assert.ok(report.diagnostics.some((item: { code: string; file: string; line: number; evidence: string }) =>
+      item.code === 'threejs.cleanup-review' && item.file === 'scene.ts' && item.line > 0 && item.evidence));
+    assert.ok(report.diagnostics.some((item: { code: string }) => item.code === 'python.async-blocking-review'));
+    const text = (await launch()).stdout;
+    assert.match(text, /读取源码 2/);
+    assert.match(text, /scene.ts:\d+/);
+    assert.doesNotMatch(text, /undefined/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('doctor --json 报告 DSH 版本并只公开密钥设置状态', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-cli-doctor-'));
+  try {
+    const fakeKey = 'local-fixture-key-only';
+    const result = await exec(process.execPath, [cli, '-C', root, 'doctor', '--json'], {
+      timeout: 20_000, encoding: 'utf8', env: { ...process.env, WEB3D_API_KEY: fakeKey },
+    });
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual(report.runtime, { name: 'DeepSeek Harness', version: '0.2.1-rc.5' });
+    assert.equal(report.apiKeyConfigured, true);
+    assert.equal(report.modelRequestPerformed, false);
+    assert.equal(report.rules.count, 3);
+    assert.ok(Array.isArray(report.rules.sources));
+    assert.ok(!result.stdout.includes(fakeKey));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

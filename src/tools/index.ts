@@ -1,11 +1,11 @@
-import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ToolContext, ToolDefinition } from '../types.js';
 import {
-  checkAbort, checkedWrite, fingerprint, inputKeys, integerArg, MAX_OUTPUT_CHARS,
+  checkAbort, checkedWrite, inputKeys, integerArg, MAX_OUTPUT_CHARS,
   readText, textArg, walkFiles, workspacePath,
 } from './workspace.js';
 import { readFile } from './readFile.js';
+import { inspectProject } from './project.js';
 
 const str = { type: 'string' };
 const schema = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({ type: 'object', properties, required, additionalProperties: false });
@@ -57,50 +57,6 @@ async function runCommand(input: Record<string, unknown>, context: ToolContext):
     });
     if (context.signal.aborted) onAbort();
   });
-}
-
-async function checkProject(context: ToolContext): Promise<unknown> {
-  const listing = await walkFiles(context, await workspacePath(context, '.'), 5, 1500);
-  const diagnostics: { level: string; file: string; message: string }[] = [];
-  const front = listing.files.filter(file => /\.(tsx?|jsx?|vue)$/.test(file));
-  const python = listing.files.filter(file => file.endsWith('.py'));
-  let three = false;
-  let cleanup = false;
-  let animation = false;
-  for (const file of front.slice(0, 60)) {
-    checkAbort(context);
-    try {
-      const content = await readText(await workspacePath(context, file));
-      if (/from\s*['"](?:three|@react-three\/fiber)|THREE\./.test(content)) three = true;
-      if (/\.dispose\s*\(/.test(content)) cleanup = true;
-      if (/requestAnimationFrame|setAnimationLoop|useFrame/.test(content)) animation = true;
-    } catch { /* 扫描跳过过大或非文本文件，保留其余诊断。 */ }
-  }
-  if (three && animation && !cleanup) diagnostics.push({ level: 'review', file: '(已扫描的前端文件)', message: '发现 Three.js 与动画调用，未发现显式 dispose；请检查生命周期清理或由框架管理的资源释放，不能据此断定内存泄漏。' });
-  for (const file of python.slice(0, 60)) {
-    checkAbort(context);
-    try {
-      const content = await readText(await workspacePath(context, file));
-      if (/async def/.test(content) && /time\.sleep\s*\(|requests\.(get|post|put|delete)\s*\(/.test(content)) {
-        diagnostics.push({ level: 'review', file, message: '同一文件中出现 async def 和同步阻塞调用；请人工确认是否位于异步请求路径。' });
-      }
-      if (/CORSMiddleware/.test(content) && /allow_origins\s*=\s*\[\s*['"]\*['"]/.test(content)) {
-        diagnostics.push({ level: 'review', file, message: '发现通配 CORS 来源，请检查部署环境与凭据策略。' });
-      }
-    } catch { /* 不让单个文件失败中断整个项目的启发式检查。 */ }
-  }
-  const contracts = listing.files.filter(file => /(?:openapi|schema|contract|pydantic)/i.test(file));
-  return {
-    scope: '启发式文件检查，不替代类型检查、运行测试或浏览器渲染验证',
-    filesScanned: listing.files.length, truncated: listing.truncated,
-    frontend: { files: front.length, sampled: Math.min(front.length, 60), threeDetected: three },
-    backend: { pythonFiles: python.length, sampled: Math.min(python.length, 60) },
-    contractFiles: contracts.slice(0, 20), diagnostics: diagnostics.slice(0, 30),
-    suggestedChecks: [
-      ...(front.length ? ['在项目既有脚本中运行 TypeScript 类型检查和前端构建；人工确认相机、尺寸、动画与清理。'] : []),
-      ...(python.length ? ['使用项目指定的 Python 环境运行 pytest 与类型/格式检查；验证 API 请求与响应契约。'] : []),
-    ],
-  };
 }
 
 export function createTools(): ToolDefinition[] {
@@ -185,7 +141,7 @@ export function createTools(): ToolDefinition[] {
     {
       name: 'check_project', kind: 'read', description: '启发式检查 Three.js 资源生命周期、Python 异步阻塞线索与前后端契约文件，不运行命令且不保证通过检查即正确。',
       parameters: schema({}),
-      async execute(input, context) { inputKeys(input, []); return await checkProject(context); },
+      async execute(input, context) { return inspectProject(context, input); },
     },
   ];
 }

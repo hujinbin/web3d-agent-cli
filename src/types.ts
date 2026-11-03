@@ -9,6 +9,7 @@ export interface ToolCall {
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | null;
+  reasoning_content?: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }

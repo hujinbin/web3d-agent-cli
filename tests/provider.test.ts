@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { OpenAICompatibleProvider } from '../src/providers/openai.js';
 import { DemoProvider } from '../src/providers/demo.js';
+import { createSession, readSession, saveSession } from '../src/session.js';
 import type { AgentConfig, Message, ToolDefinition } from '../src/types.js';
 
 const config: AgentConfig = { baseUrl: '', model: 'test-model', apiKeyEnv: 'WEB3D_API_KEY', maxSteps: 20, contextChars: 100000, maxOutputTokens: 4096, requestTimeoutMs: 1000, stream: false };
@@ -52,7 +56,9 @@ test('JSON 接口正确映射请求、工具和用量，已有 endpoint 不重�
 test('SSE 支持 UTF-8 分片和多个工具参数增量', async t => {
   const baseUrl = await serve(t, (_req, res) => {
     res.setHeader('content-type', 'text/event-stream');
-    const wire = event({ role: 'assistant', content: '检查模型' })
+    const wire = event({ role: 'assistant', reasoning_content: '先检查' })
+      + event({ reasoning_content: '场景结构。' })
+      + event({ content: '检查模型', reasoning_content: null })
       + event({ tool_calls: [{ index: 0, id: 'call_a', type: 'function', function: { name: 'list_files', arguments: '{"pa' } }, { index: 1, id: 'call_b', type: 'function', function: { name: 'check_project', arguments: '{' } }] })
       + event({ tool_calls: [{ index: 1, function: { arguments: '}' } }, { index: 0, function: { arguments: 'th":"."}' } }] })
       + event({}, 'tool_calls') + 'data: {"choices":[],"usage":{"prompt_tokens":30,"completion_tokens":8,"total_tokens":38}}\r\n\r\n' + 'data: [DONE]\r\n\r\n';
@@ -69,6 +75,7 @@ test('SSE 支持 UTF-8 分片和多个工具参数增量', async t => {
   let streamed = '';
   const result = await new OpenAICompatibleProvider({ ...config, baseUrl, stream: true }).complete(messages, tools, new AbortController().signal, text => { streamed += text; });
   assert.equal(streamed, '检查模型');
+  assert.equal(result.message.reasoning_content, '先检查场景结构。');
   assert.equal(result.finishReason, 'tool_calls');
   assert.equal(result.message.tool_calls?.[0]?.function.arguments, '{"path":"."}');
   assert.equal(result.message.tool_calls?.[1]?.function.arguments, '{}');
@@ -171,4 +178,81 @@ test('离线演示在每个新用户轮次重新运行并明确脚本身份', as
   assert.match(end.message.content!, /不是模型推理/);
   const next = await provider.complete([...afterList, end.message, { role: 'user', content: '再检查' }], tools, signal);
   assert.equal(next.message.tool_calls?.[0]?.function.name, 'list_files');
+});
+
+test('JSON 思考内容经过会话恢复后在工具轮和新用户轮原样回传', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-reasoning-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const reasoning = '先检查场景中的资源所有权。\n包含引号 " 和中文。';
+  const finalReasoning = '工具返回后核对清理路径。';
+  let requests = 0;
+  const baseUrl = await serve(t, async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const request = JSON.parse(body);
+    requests++;
+    if (requests === 1) {
+      assert.equal(request.messages[0].reasoning_content, undefined);
+      res.end(completion({ role: 'assistant', content: null, reasoning_content: reasoning, tool_calls: [{ id: 'thinking_call', type: 'function', function: { name: 'list_files', arguments: '{}' } }] }, 'tool_calls'));
+      return;
+    }
+    const assistants = request.messages.filter((message: Message) => message.role === 'assistant');
+    assert.equal(assistants[0].reasoning_content, reasoning);
+    assert.equal(request.messages[2].tool_call_id, 'thinking_call');
+    if (requests === 2) {
+      res.end(completion({ role: 'assistant', content: '检查完成。', reasoning_content: finalReasoning }));
+      return;
+    }
+    assert.equal(assistants[1].reasoning_content, finalReasoning);
+    res.end(completion({ role: 'assistant', content: '继续处理。', reasoning_content: null }));
+  });
+  const provider = new OpenAICompatibleProvider({ ...config, baseUrl });
+  const session = createSession(root);
+  session.messages.push(...structuredClone(messages));
+  let visible = '';
+  const first = await provider.complete(session.messages, tools, new AbortController().signal, text => { visible += text; });
+  assert.equal(visible, '');
+  session.messages.push(first.message, { role: 'tool', tool_call_id: 'thinking_call', content: '[]' });
+  await saveSession(session);
+  const restored = await readSession(root, session.id);
+  assert.equal(restored.messages[1]?.reasoning_content, reasoning);
+  const second = await provider.complete(restored.messages, tools, new AbortController().signal, text => { visible += text; });
+  assert.equal(visible, '检查完成。');
+  restored.messages.push(second.message, { role: 'user', content: '再检查一次' });
+  await saveSession(restored);
+  const third = await provider.complete((await readSession(root, session.id)).messages, tools, new AbortController().signal);
+  assert.equal(third.message.reasoning_content, null);
+  assert.equal(requests, 3);
+});
+
+test('JSON 与 SSE 拒绝无效思考字段及超限思考输出', async t => {
+  for (const stream of [false, true]) {
+    let reasoning: unknown = { invalid: true };
+    const baseUrl = await serve(t, (_req, res) => {
+      if (stream) {
+        res.end(event({ reasoning_content: reasoning }) + event({ content: '结论' }, 'stop') + 'data: [DONE]\n\n');
+      } else {
+        res.end(completion({ role: 'assistant', content: '结论', reasoning_content: reasoning }));
+      }
+    });
+    const provider = new OpenAICompatibleProvider({ ...config, baseUrl, stream });
+    await assert.rejects(provider.complete(messages, tools, new AbortController().signal), /思考内容格式无效/);
+    reasoning = 'x'.repeat(1024 * 1024 + 1);
+    await assert.rejects(provider.complete(messages, tools, new AbortController().signal), /思考内容超过大小限制/);
+  }
+});
+
+test('SSE 缺省、空字符串与 null 思考内容保持各自语义', async t => {
+  let reasoning: unknown = undefined;
+  const baseUrl = await serve(t, (_req, res) => {
+    const delta = reasoning === undefined ? { content: '结论' } : { content: '结论', reasoning_content: reasoning };
+    res.end(event(delta, 'stop') + 'data: [DONE]\n\n');
+  });
+  const provider = new OpenAICompatibleProvider({ ...config, baseUrl, stream: true });
+  for (const value of [undefined, '', null]) {
+    reasoning = value;
+    const result = await provider.complete(messages, tools, new AbortController().signal);
+    assert.equal(result.message.reasoning_content, value);
+    assert.equal(Object.hasOwn(result.message, 'reasoning_content'), value !== undefined);
+  }
 });

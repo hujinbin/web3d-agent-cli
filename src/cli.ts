@@ -1,19 +1,30 @@
 #!/usr/bin/env node
 import { realpath } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { stdin, stdout } from 'node:process';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs, stripVTControlCharacters } from 'node:util';
-import { runAgent } from './agent.js';
+import { runDshAgent } from './runtime/dsh.js';
 import { loadConfig } from './config.js';
 import { DemoProvider } from './providers/demo.js';
 import { OpenAICompatibleProvider } from './providers/openai.js';
 import { buildSystemPrompt, initializeProject, loadRules } from './rules/index.js';
 import { createSession, listSessions, readSession, saveSession } from './session.js';
 import { createTools } from './tools/index.js';
+import { inspectProject } from './tools/project.js';
 import type { AgentConfig, AgentEvent, ApprovalRequest, PermissionMode } from './types.js';
 
+declare const __WEB3D_DSH_VERSION__: string | undefined;
+const harness = {
+  name: 'DeepSeek Harness',
+  version: typeof __WEB3D_DSH_VERSION__ === 'string'
+    ? __WEB3D_DSH_VERSION__
+    : String(createRequire(import.meta.url)('@deepseek-ai/dsh-agent-loop/package.json').version),
+};
+const clean = (value: string) => stripVTControlCharacters(value).replace(/\r/g, '');
+
 const HELP = `
-web3d-agent 0.1.0 · Three.js / Python 编程智能体
+web3d-agent 0.2.0 · DSH / Three.js / Python 编程智能体
 
 用法：
   web3d-agent init                         初始化项目配置与规则
@@ -22,6 +33,7 @@ web3d-agent 0.1.0 · Three.js / Python 编程智能体
   web3d-agent rules                        查看当前加载的规则
   web3d-agent sessions                     列出工作区会话
   web3d-agent doctor                       检查配置与运行环境
+  web3d-agent check                        本地检查 Three.js / Python 项目
 
 选项：
   -C, --cwd <目录>           目标项目，默认当前目录
@@ -33,7 +45,7 @@ web3d-agent 0.1.0 · Three.js / Python 编程智能体
       --resume <ID|latest>   恢复同一工作区的会话，文件覆盖前仍需重新读取
       --demo                 使用离线演示脚本，无网络请求
       --no-stream            使用非流式 JSON，供不支持 SSE 的服务使用
-      --json                 单次运行输出 JSONL；不会交互询问，未授权操作自动拒绝
+      --json                 run 输出 JSONL，check / doctor 输出 JSON
   -h, --help                 显示帮助
   -v, --version              显示版本
 
@@ -54,11 +66,24 @@ async function main(): Promise<void> {
     },
   });
   if (values.help) { stdout.write(HELP); return; }
-  if (values.version) { stdout.write('0.1.0\n'); return; }
+  if (values.version) { stdout.write('0.2.0\n'); return; }
   const cwd = await realpath(values.cwd ?? process.cwd());
   const command = positionals[0] ?? 'chat';
-  if (!['init', 'chat', 'run', 'rules', 'sessions', 'doctor'].includes(command)) throw new Error(`未知命令 ${command}。请使用 run "任务" 或 --help`);
+  if (!['init', 'chat', 'run', 'rules', 'sessions', 'doctor', 'check'].includes(command)) throw new Error(`未知命令 ${command}。请使用 run "任务" 或 --help`);
   if (command !== 'run' && positionals.length > 1) throw new Error(`${command} 不接受额外参数`);
+  if (values.json && !['run', 'check', 'doctor'].includes(command)) throw new Error('--json 支持 run、check 和 doctor');
+  if (command === 'check') {
+    const report = await inspectProject({ cwd, signal: new AbortController().signal, readState: new Map() });
+    if (values.json) stdout.write(JSON.stringify(report) + '\n');
+    else {
+      stdout.write(clean(`项目检查 · ${cwd}\n读取源码 ${report.summary.scannedFiles} · 跳过 ${report.summary.skippedFiles} · 检查建议 ${report.summary.diagnosticsReturned}/${report.summary.diagnosticsTotal}\n`));
+      stdout.write(`扫描范围 深度 ${report.limits.maxDepth} · 枚举上限 ${report.limits.maxListedFiles} · 每类源码上限 ${report.limits.maxFilesPerDomain}\n截断 ${report.truncated ? '是，请查看 --json 中的 coverage' : '否'}\n`);
+      if (report.summary.skippedFiles) stdout.write(`跳过统计 ${JSON.stringify(report.summary.skippedByReason)}\n`);
+      for (const item of report.diagnostics) stdout.write(clean(`\n[${item.code}] ${item.file}:${item.line}\n${item.message}\n${item.evidence}\n`));
+      stdout.write(`\n${report.scope}\n`);
+    }
+    return;
+  }
   if (command === 'init') {
     const files = await initializeProject(cwd);
     stdout.write(files.length ? `已创建：\n${files.map(file => `  ${file}`).join('\n')}\n` : '配置和规则已存在，未覆盖文件。\n');
@@ -85,14 +110,22 @@ async function main(): Promise<void> {
   // 配置校验不会发起网络连接，也不会输出环境变量中的密钥。
   if (command === 'doctor') {
     new OpenAICompatibleProvider(config, apiKey);
-    stdout.write(`Node: ${process.version}\n工作目录: ${cwd}\nAPI: ${config.baseUrl}\n模型: ${config.model || '未配置'}\n密钥: ${apiKey ? '已设置' : '未设置（本地免认证服务可省略）'}\n流式: ${config.stream}\n规则: ${loaded.rules.length} 条\n`);
-    for (const warning of loaded.warnings) stdout.write(`提示: ${warning}\n`);
-    stdout.write('未调用模型；真实连通性请执行一个小任务验证。\n');
+    const report = {
+      runtime: harness, node: process.version, cwd, baseUrl: config.baseUrl,
+      model: config.model || null, apiKeyConfigured: Boolean(apiKey), stream: config.stream,
+      rules: { count: loaded.rules.length, sources: loaded.rules.map(rule => rule.source), warnings: loaded.warnings },
+      modelRequestPerformed: false,
+    };
+    if (values.json) stdout.write(JSON.stringify(report) + '\n');
+    else {
+      stdout.write(`运行时 ${harness.name} ${harness.version}\nNode ${report.node}\n工作目录 ${cwd}\nAPI ${config.baseUrl}\n模型 ${config.model || '未配置'}\n密钥 ${apiKey ? '已设置' : '未设置（本地免认证服务可省略）'}\n流式 ${config.stream}\n规则 ${loaded.rules.length} 条\n`);
+      for (const warning of loaded.warnings) stdout.write(`提示 ${warning}\n`);
+      stdout.write('配置检查完成。模型连通性可通过 run 执行一个小任务验证。\n');
+    }
     return;
   }
   let mode = values.mode ?? 'ask';
   if (!['ask', 'auto-edit', 'plan'].includes(mode)) throw new Error('mode 必须是 ask、auto-edit 或 plan');
-  if (values.json && command !== 'run') throw new Error('--json 仅支持 run 单次任务');
   if (command === 'run' && !positionals.slice(1).join(' ').trim()) throw new Error('run 后需要提供任务文本');
   if (command === 'chat' && !stdin.isTTY) throw new Error('非交互终端请使用 run "任务"；运行离线演示可加 --demo');
   if (!values.demo) {
@@ -115,7 +148,6 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', cancel);
   rl?.on('SIGINT', cancel);
-  const clean = (value: string) => stripVTControlCharacters(value).replace(/\r/g, '');
   let lineOpen = false;
   const newline = () => { if (lineOpen) { stdout.write('\n'); lineOpen = false; } };
   const onEvent = (event: AgentEvent) => {
@@ -140,8 +172,8 @@ async function main(): Promise<void> {
   const execute = async (prompt: string) => {
     active = new AbortController();
     try {
-      const result = await runAgent({
-        provider, tools: createTools(), session, prompt,
+      const result = await runDshAgent({
+        provider, model: values.demo ? 'demo' : config.model, tools: createTools(), session, prompt,
         systemPrompt: buildSystemPrompt({ cwd, mode: mode as PermissionMode, rules: loaded.rules }),
         mode: mode as PermissionMode, maxSteps: config.maxSteps, contextChars: config.contextChars,
         allowRun: values['allow-run'] ?? false, signal: active.signal, approve, onEvent,
@@ -162,7 +194,7 @@ async function main(): Promise<void> {
   };
   try {
     if (!values.json) {
-      stdout.write(`\nWEB3D AGENT · ${values.demo ? '离线演示脚本' : config.model}\n${cwd}\n模式 ${mode} · 规则 ${loaded.rules.length} · /help 查看命令\n`);
+      stdout.write(`\nWEB3D AGENT · DSH ${harness.version} · ${values.demo ? '离线演示脚本' : config.model}\n${cwd}\n模式 ${mode} · 规则 ${loaded.rules.length} · /help 查看命令\n`);
       for (const warning of loaded.warnings) process.stderr.write(`规则提示：${warning}\n`);
     }
     if (command === 'run') { await execute(positionals.slice(1).join(' ')); return; }
@@ -173,7 +205,7 @@ async function main(): Promise<void> {
       if (prompt === '/exit' || prompt === '/quit') break;
       if (prompt === '/help') { stdout.write('/help /rules /status /sessions /resume <ID|latest> /new /mode <ask|auto-edit|plan> /exit\n'); continue; }
       if (prompt === '/rules') { stdout.write(loaded.rules.map(rule => `• ${rule.name} (${rule.source})`).join('\n') + '\n'); continue; }
-      if (prompt === '/status') { stdout.write(`会话 ${session.id}\n消息 ${session.messages.length} · 模式 ${mode} · 模型 ${values.demo ? '离线脚本' : config.model}\n`); continue; }
+      if (prompt === '/status') { stdout.write(`会话 ${session.id}\n运行时 ${harness.name} ${harness.version}\n消息 ${session.messages.length} · 模式 ${mode} · 模型 ${values.demo ? '离线脚本' : config.model}\n`); continue; }
       if (prompt === '/sessions') { stdout.write((await listSessions(cwd)).map(item => `${item.id} ${item.updatedAt}`).join('\n') + '\n'); continue; }
       if (prompt === '/new') { session = createSession(cwd); readState.clear(); stdout.write('已开始新会话。\n'); continue; }
       if (prompt.startsWith('/mode ')) {

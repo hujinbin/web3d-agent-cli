@@ -2,6 +2,7 @@ import type { AgentConfig, Completion, Message, ModelProvider, ToolCall, ToolDef
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_ARGUMENT_CHARS = 256 * 1024;
+const MAX_REASONING_CHARS = 1024 * 1024;
 const MAX_TOOLS = 32;
 
 class ProviderError extends Error {}
@@ -40,6 +41,12 @@ function validateCompletion(value: unknown, finishReason: unknown, usage?: Compl
     throw new ProviderError('模型返回了不受支持的消息内容格式。');
   }
   const message: Message = { role: 'assistant', content: typeof value.content === 'string' ? value.content : null };
+  if (value.reasoning_content !== undefined) {
+    const reasoning = value.reasoning_content;
+    if (reasoning !== null && typeof reasoning !== 'string') throw new ProviderError('模型思考内容格式无效。');
+    if (typeof reasoning === 'string' && reasoning.length > MAX_REASONING_CHARS) throw new ProviderError('模型思考内容超过大小限制。');
+    message.reasoning_content = reasoning;
+  }
   if (value.tool_calls !== undefined && value.tool_calls !== null) {
     if (!Array.isArray(value.tool_calls) || value.tool_calls.length > MAX_TOOLS) throw new ProviderError('模型工具调用列表无效或数量超限。');
     const ids = new Set<string>();
@@ -89,6 +96,7 @@ async function parseSSE(response: Response, onText?: (text: string) => void): Pr
   const calls = new Map<number, { id: string; type: string; function: { name: string; arguments: string } }>();
   let buffer = '';
   let text = '';
+  let reasoningContent: string | null | undefined;
   let bytes = 0;
   let finishReason: string | undefined;
   let usage: Completion['usage'];
@@ -110,6 +118,17 @@ async function parseSSE(response: Response, onText?: (text: string) => void): Pr
     if (!object(choice.delta)) throw new ProviderError('流式响应缺少 delta。');
     const delta = choice.delta;
     if (delta.role !== undefined && delta.role !== 'assistant') throw new ProviderError('流式响应角色无效。');
+    if (delta.reasoning_content !== undefined) {
+      const reasoning = delta.reasoning_content;
+      if (reasoning !== null && typeof reasoning !== 'string') throw new ProviderError('流式思考内容格式无效。');
+      if (reasoning === null) {
+        if (reasoningContent === undefined) reasoningContent = null;
+      } else {
+        // 思考内容保留在协议字段中，供后续工具轮次回传。
+        reasoningContent = (reasoningContent ?? '') + reasoning;
+        if (reasoningContent.length > MAX_REASONING_CHARS) throw new ProviderError('流式思考内容超过大小限制。');
+      }
+    }
     if (delta.content !== undefined && delta.content !== null) {
       if (typeof delta.content !== 'string') throw new ProviderError('流式文本格式无效。');
       text += delta.content;
@@ -162,7 +181,12 @@ async function parseSSE(response: Response, onText?: (text: string) => void): Pr
     if (!ended || !finishReason) throw new ProviderError('模型流意外中断，未收到完整结束标记和结束原因。');
     const ordered = [...calls.entries()].sort(([a], [b]) => a - b);
     if (ordered.some(([index], position) => index !== position)) throw new ProviderError('模型工具调用索引不连续。');
-    return validateCompletion({ role: 'assistant', content: text || null, ...(calls.size ? { tool_calls: ordered.map(([, call]) => call) } : {}) }, finishReason, usage);
+    return validateCompletion({
+      role: 'assistant',
+      content: text || null,
+      ...(reasoningContent !== undefined ? { reasoning_content: reasoningContent } : {}),
+      ...(calls.size ? { tool_calls: ordered.map(([, call]) => call) } : {}),
+    }, finishReason, usage);
   } finally {
     await reader.cancel().catch(() => undefined);
   }

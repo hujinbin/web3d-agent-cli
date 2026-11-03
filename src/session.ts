@@ -34,6 +34,9 @@ export function validateMessages(input: unknown): Message[] {
   for (const raw of input) {
     if (!raw || typeof raw !== 'object' || !['user', 'assistant', 'tool'].includes(raw.role)) throw new Error('会话包含非法角色');
     if (raw.content !== null && typeof raw.content !== 'string') throw new Error('会话消息内容不正确');
+    if (raw.reasoning_content !== undefined && (raw.role !== 'assistant' || (raw.reasoning_content !== null && typeof raw.reasoning_content !== 'string'))) {
+      throw new Error('会话思考内容格式不正确');
+    }
     if (raw.role === 'assistant' && raw.tool_calls !== undefined) {
       if (pending.size || !Array.isArray(raw.tool_calls) || !raw.tool_calls.length) throw new Error('会话工具调用未配对');
       for (const call of raw.tool_calls) {
