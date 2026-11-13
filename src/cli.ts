@@ -2,10 +2,12 @@
 import { realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { stdin, stdout } from 'node:process';
-import { createInterface } from 'node:readline/promises';
 import { parseArgs, stripVTControlCharacters } from 'node:util';
 import { runDshAgent } from './runtime/dsh.js';
-import { loadConfig } from './config.js';
+import { getUserConfigDir, loadConfigWithSource, saveUserConfig } from './config.js';
+import { loadApiKey } from './credentials.js';
+import { configureModel } from './setup.js';
+import { createTerminal } from './terminal.js';
 import { DemoProvider } from './providers/demo.js';
 import { OpenAICompatibleProvider } from './providers/openai.js';
 import { buildSystemPrompt, initializeProject, loadRules } from './rules/index.js';
@@ -15,6 +17,10 @@ import { inspectProject } from './tools/project.js';
 import type { AgentConfig, AgentEvent, ApprovalRequest, PermissionMode } from './types.js';
 
 declare const __WEB3D_DSH_VERSION__: string | undefined;
+declare const __WEB3D_VERSION__: string | undefined;
+const version = typeof __WEB3D_VERSION__ === 'string'
+  ? __WEB3D_VERSION__
+  : String(createRequire(import.meta.url)('../package.json').version);
 const harness = {
   name: 'DeepSeek Harness',
   version: typeof __WEB3D_DSH_VERSION__ === 'string'
@@ -24,7 +30,7 @@ const harness = {
 const clean = (value: string) => stripVTControlCharacters(value).replace(/\r/g, '');
 
 const HELP = `
-web3d-agent 0.2.0 · DSH / Three.js / Python 编程智能体
+web3d-agent ${version} · DSH / Three.js / Python 编程智能体
 
 用法：
   web3d-agent init                         初始化项目配置与规则
@@ -34,6 +40,7 @@ web3d-agent 0.2.0 · DSH / Three.js / Python 编程智能体
   web3d-agent sessions                     列出工作区会话
   web3d-agent doctor                       检查配置与运行环境
   web3d-agent check                        本地检查 Three.js / Python 项目
+  web3d-agent setup                        配置模型接口并保存为用户默认设置
 
 选项：
   -C, --cwd <目录>           目标项目，默认当前目录
@@ -49,8 +56,9 @@ web3d-agent 0.2.0 · DSH / Three.js / Python 编程智能体
   -h, --help                 显示帮助
   -v, --version              显示版本
 
-模型密钥通过 WEB3D_API_KEY（或配置的 apiKeyEnv）传入，也兼容 OPENAI_API_KEY。
-配置优先级：命令行 > WEB3D_MODEL/WEB3D_BASE_URL > web3d-agent.json > 默认值。
+首次交互启动会引导配置模型。聊天中输入 /model 切换模型，/setup 修改接口和密钥。
+模型密钥也支持 WEB3D_API_KEY（或配置的 apiKeyEnv）及 OPENAI_API_KEY。
+配置优先级：命令行 > 环境变量 > 项目配置 > 用户默认设置 > 内置默认值。
 `;
 
 async function main(): Promise<void> {
@@ -66,10 +74,10 @@ async function main(): Promise<void> {
     },
   });
   if (values.help) { stdout.write(HELP); return; }
-  if (values.version) { stdout.write('0.2.0\n'); return; }
+  if (values.version) { stdout.write(`${version}\n`); return; }
   const cwd = await realpath(values.cwd ?? process.cwd());
   const command = positionals[0] ?? 'chat';
-  if (!['init', 'chat', 'run', 'rules', 'sessions', 'doctor', 'check'].includes(command)) throw new Error(`未知命令 ${command}。请使用 run "任务" 或 --help`);
+  if (!['init', 'chat', 'run', 'rules', 'sessions', 'doctor', 'check', 'setup'].includes(command)) throw new Error(`未知命令 ${command}。请使用 run "任务" 或 --help`);
   if (command !== 'run' && positionals.length > 1) throw new Error(`${command} 不接受额外参数`);
   if (values.json && !['run', 'check', 'doctor'].includes(command)) throw new Error('--json 支持 run、check 和 doctor');
   if (command === 'check') {
@@ -105,8 +113,14 @@ async function main(): Promise<void> {
   if (values['base-url'] !== undefined) overrides.baseUrl = values['base-url'];
   if (values['max-steps'] !== undefined) overrides.maxSteps = Number(values['max-steps']);
   if (values['no-stream']) overrides.stream = false;
-  const config = await loadConfig(cwd, overrides);
-  const apiKey = process.env[config.apiKeyEnv] || process.env.OPENAI_API_KEY;
+  const loadedConfig = await loadConfigWithSource(cwd, overrides);
+  let config = loadedConfig.config;
+  let apiKey = process.env[config.apiKeyEnv] || process.env.OPENAI_API_KEY;
+  let credentialError = false;
+  if (!apiKey && !values.demo) {
+    try { apiKey = await loadApiKey(config.baseUrl); }
+    catch { credentialError = true; }
+  }
   // 配置校验不会发起网络连接，也不会输出环境变量中的密钥。
   if (command === 'doctor') {
     new OpenAICompatibleProvider(config, apiKey);
@@ -114,12 +128,15 @@ async function main(): Promise<void> {
       runtime: harness, node: process.version, cwd, baseUrl: config.baseUrl,
       model: config.model || null, apiKeyConfigured: Boolean(apiKey), stream: config.stream,
       rules: { count: loaded.rules.length, sources: loaded.rules.map(rule => rule.source), warnings: loaded.warnings },
+      configuration: { directory: getUserConfigDir(), modelSource: loadedConfig.sources.model, baseUrlSource: loadedConfig.sources.baseUrl, credentialError },
       modelRequestPerformed: false,
     };
     if (values.json) stdout.write(JSON.stringify(report) + '\n');
     else {
       stdout.write(`运行时 ${harness.name} ${harness.version}\nNode ${report.node}\n工作目录 ${cwd}\nAPI ${config.baseUrl}\n模型 ${config.model || '未配置'}\n密钥 ${apiKey ? '已设置' : '未设置（本地免认证服务可省略）'}\n流式 ${config.stream}\n规则 ${loaded.rules.length} 条\n`);
       for (const warning of loaded.warnings) stdout.write(`提示 ${warning}\n`);
+      stdout.write(`用户配置 ${getUserConfigDir()}\n配置模型来源 ${loadedConfig.sources.model}\n`);
+      if (credentialError) stdout.write('保存的密钥暂不可用，可通过 setup 重新设置。\n');
       stdout.write('配置检查完成。模型连通性可通过 run 执行一个小任务验证。\n');
     }
     return;
@@ -128,19 +145,16 @@ async function main(): Promise<void> {
   if (!['ask', 'auto-edit', 'plan'].includes(mode)) throw new Error('mode 必须是 ask、auto-edit 或 plan');
   if (command === 'run' && !positionals.slice(1).join(' ').trim()) throw new Error('run 后需要提供任务文本');
   if (command === 'chat' && !stdin.isTTY) throw new Error('非交互终端请使用 run "任务"；运行离线演示可加 --demo');
-  if (!values.demo) {
-    if (!config.model) throw new Error('请先通过 --model、WEB3D_MODEL 或 web3d-agent.json 设置模型名；离线体验使用 --demo');
-    const host = new URL(config.baseUrl).hostname;
-    if (!apiKey && !['localhost', '127.0.0.1', '[::1]'].includes(host)) throw new Error(`未设置 ${config.apiKeyEnv}（或 OPENAI_API_KEY）。本地免认证服务可省略密钥`);
-  }
-  const provider = values.demo ? new DemoProvider() : new OpenAICompatibleProvider(config, apiKey);
+  let demo = Boolean(values.demo);
+  let provider = demo ? new DemoProvider() : new OpenAICompatibleProvider(config, apiKey);
   let session = createSession(cwd);
   if (values.resume) {
     const id = values.resume === 'latest' ? (await listSessions(cwd))[0]?.id : values.resume;
     if (!id) throw new Error('没有可恢复的会话');
     session = await readSession(cwd, id);
   }
-  const rl = stdin.isTTY && !values.json ? createInterface({ input: stdin, output: stdout }) : undefined;
+  const terminal = stdin.isTTY && stdout.isTTY && !values.json ? createTerminal() : undefined;
+  const rl = terminal?.readline;
   let active: AbortController | undefined;
   const cancel = () => {
     if (active) active.abort(new Error('用户取消任务'));
@@ -148,6 +162,25 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', cancel);
   rl?.on('SIGINT', cancel);
+  const setup = async (modelsOnly = false): Promise<'completed' | 'cancelled' | 'failed'> => {
+    if (!terminal) throw new Error('模型配置需要交互终端。请在终端运行 web3d-agent setup，或通过 --model 与环境变量提供模型配置');
+    active = new AbortController();
+    try {
+      const selected = await configureModel({ current: config, apiKey, io: terminal, signal: active.signal, modelsOnly });
+      config = { ...config, baseUrl: selected.baseUrl, model: selected.model };
+      apiKey = selected.apiKey;
+      provider = new OpenAICompatibleProvider(config, apiKey);
+      demo = false;
+      return 'completed';
+    } catch (error) {
+      if (active.signal.aborted || (error as Error).name === 'AbortError') {
+        stdout.write('\n已取消模型配置。\n');
+        return 'cancelled';
+      }
+      process.stderr.write(`模型配置失败 ${(error as Error).message}\n`);
+      return 'failed';
+    } finally { active = undefined; }
+  };
   let lineOpen = false;
   const newline = () => { if (lineOpen) { stdout.write('\n'); lineOpen = false; } };
   const onEvent = (event: AgentEvent) => {
@@ -173,7 +206,7 @@ async function main(): Promise<void> {
     active = new AbortController();
     try {
       const result = await runDshAgent({
-        provider, model: values.demo ? 'demo' : config.model, tools: createTools(), session, prompt,
+        provider, model: demo ? 'demo' : config.model, tools: createTools(), session, prompt,
         systemPrompt: buildSystemPrompt({ cwd, mode: mode as PermissionMode, rules: loaded.rules }),
         mode: mode as PermissionMode, maxSteps: config.maxSteps, contextChars: config.contextChars,
         allowRun: values['allow-run'] ?? false, signal: active.signal, approve, onEvent,
@@ -193,19 +226,43 @@ async function main(): Promise<void> {
     } finally { active = undefined; }
   };
   try {
+    if (command === 'setup') {
+      const outcome = await setup();
+      if (outcome !== 'completed') process.exitCode = outcome === 'cancelled' ? 130 : 1;
+      return;
+    }
+    if (!demo && (!config.model || credentialError)) {
+      if (!terminal) throw new Error('尚未设置模型名或可用凭据。请先在终端运行 web3d-agent setup，自动化调用也支持 --model、WEB3D_MODEL 和项目配置');
+      stdout.write('\n欢迎使用 Web3D Agent，先配置一个模型即可开始。\n');
+      const outcome = await setup();
+      if (outcome !== 'completed') { process.exitCode = outcome === 'cancelled' ? 130 : 1; return; }
+    }
     if (!values.json) {
-      stdout.write(`\nWEB3D AGENT · DSH ${harness.version} · ${values.demo ? '离线演示脚本' : config.model}\n${cwd}\n模式 ${mode} · 规则 ${loaded.rules.length} · /help 查看命令\n`);
+      stdout.write(clean(`\nWEB3D AGENT · DSH ${harness.version}\n模型 ${demo ? '离线演示脚本' : config.model} · 模式 ${mode}\n接口 ${config.baseUrl}\n${cwd}\n/model 切换模型 · /setup 配置接口 · /help 查看命令\n`));
       for (const warning of loaded.warnings) process.stderr.write(`规则提示：${warning}\n`);
     }
     if (command === 'run') { await execute(positionals.slice(1).join(' ')); return; }
     while (rl) {
       let prompt: string;
-      try { prompt = (await rl.question('\nweb3d › ')).trim(); } catch { break; }
+      try { prompt = (await terminal!.question('\nweb3d › ')).trim(); } catch { break; }
       if (!prompt) continue;
       if (prompt === '/exit' || prompt === '/quit') break;
-      if (prompt === '/help') { stdout.write('/help /rules /status /sessions /resume <ID|latest> /new /mode <ask|auto-edit|plan> /exit\n'); continue; }
+      if (prompt === '/help') { stdout.write('/help /model [模型ID] /setup /rules /status /sessions /resume <ID|latest> /new /mode <ask|auto-edit|plan> /exit\n'); continue; }
+      if (prompt === '/setup' || prompt === '/model') { await setup(prompt === '/model' && !demo); continue; }
+      if (prompt.startsWith('/model ')) {
+        const model = prompt.slice(7).trim();
+        if (!model || model.length > 200 || /[\x00-\x1f\x7f]/.test(model)) { stdout.write('请输入有效模型 ID。\n'); continue; }
+        try {
+          await saveUserConfig({ model, baseUrl: config.baseUrl });
+          config = { ...config, model };
+          provider = new OpenAICompatibleProvider(config, apiKey);
+          demo = false;
+          stdout.write(clean(`已切换并保存默认模型 ${model}\n`));
+        } catch (error) { process.stderr.write(`保存模型失败 ${(error as Error).message}\n`); }
+        continue;
+      }
       if (prompt === '/rules') { stdout.write(loaded.rules.map(rule => `• ${rule.name} (${rule.source})`).join('\n') + '\n'); continue; }
-      if (prompt === '/status') { stdout.write(`会话 ${session.id}\n运行时 ${harness.name} ${harness.version}\n消息 ${session.messages.length} · 模式 ${mode} · 模型 ${values.demo ? '离线脚本' : config.model}\n`); continue; }
+      if (prompt === '/status') { stdout.write(clean(`会话 ${session.id}\n运行时 ${harness.name} ${harness.version}\n消息 ${session.messages.length} · 模式 ${mode} · 模型 ${demo ? '离线脚本' : config.model}\n接口 ${config.baseUrl}\n`)); continue; }
       if (prompt === '/sessions') { stdout.write((await listSessions(cwd)).map(item => `${item.id} ${item.updatedAt}`).join('\n') + '\n'); continue; }
       if (prompt === '/new') { session = createSession(cwd); readState.clear(); stdout.write('已开始新会话。\n'); continue; }
       if (prompt.startsWith('/mode ')) {

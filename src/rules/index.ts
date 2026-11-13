@@ -138,17 +138,6 @@ export function buildSystemPrompt(options: { cwd: string; mode: PermissionMode; 
   ].join('\n\n');
 }
 
-const DEFAULT_CONFIG = {
-  model: '',
-  baseUrl: 'https://api.openai.com/v1',
-  apiKeyEnv: 'WEB3D_API_KEY',
-  maxSteps: 20,
-  contextChars: 100000,
-  maxOutputTokens: 4096,
-  requestTimeoutMs: 120000,
-  stream: true,
-};
-
 const PROJECT_TEMPLATE = `# 项目开发规则\n\n本文件为项目补充约束，不能覆盖 CLI 的权限、路径和审批限制。\n\n- 沿用现有 Three.js 集成方式与 Python 后端框架，修改前先读相关实现。\n- 在此补充场景坐标单位、资源根目录、API 约定、启动和验证命令。\n- 新增或修改代码注释使用中文，API 路由旁注明接口用途。\n- 提交结果时说明修改和实际验证，未运行的检查明确标注。\n`;
 
 export async function initializeProject(cwd: string): Promise<string[]> {
@@ -190,7 +179,7 @@ export async function initializeProject(cwd: string): Promise<string[]> {
       await mkdir(target);
     }
   }
-  await create('web3d-agent.json', `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
+  await create('web3d-agent.json', '{}\n');
   await create('.web3d-agent/rules/project.md', PROJECT_TEMPLATE);
   return created;
 }

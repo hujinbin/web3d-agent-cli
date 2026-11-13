@@ -49,10 +49,8 @@ test('初始化写入模板并保持已有文件和自定义配置', async () =>
   try {
     const created = await initializeProject(root);
     assert.deepEqual(created, ['web3d-agent.json', '.web3d-agent/rules/project.md']);
-    const config = JSON.parse(await readFile(path.join(root, 'web3d-agent.json'), 'utf-8')) as { model: string; stream: boolean; maxSteps: number };
-    assert.equal(config.model, '');
-    assert.equal(config.stream, true);
-    assert.equal(config.maxSteps, 20);
+    const config = JSON.parse(await readFile(path.join(root, 'web3d-agent.json'), 'utf-8'));
+    assert.deepEqual(config, {});
     await writeFile(path.join(root, 'web3d-agent.json'), '{"model":"my-model"}', 'utf-8');
     await writeFile(path.join(root, '.web3d-agent/rules/project.md'), '保留我的规则', 'utf-8');
     assert.deepEqual(await initializeProject(root), []);

@@ -2,7 +2,7 @@
 
 面向 **Three.js 3D 应用与 Python 后端**的编程智能体终端工具。基于 **DeepSeek Harness（DSH）** 的 AgentLoop、模型适配、会话投影和工具运行时，使用 TypeScript 实现终端交互、兼容 OpenAI 的接口、项目规则和工作区工具。
 
-当前版本为 `0.2.0`，固定使用 DSH 核心插件 `0.2.1-rc.5` 与 Cordis `4.0.5`。通过嵌入核心插件启动运行时，`run`、`chat` 和离线演示均由 DSH 调度模型与工具。DSH 的接口随预览版本变化，依赖版本与锁文件一起维护。[DSH 官方仓库](https://github.com/deepseek-ai/deepseek-harness)
+固定使用 DSH 核心插件 `0.2.1-rc.5` 与 Cordis `4.0.5`。通过嵌入核心插件启动运行时，`run`、`chat` 和离线演示均由 DSH 调度模型与工具。[DSH 官方仓库](https://github.com/deepseek-ai/deepseek-harness)
 
 ```text
 web3d › 检查模型切换后 GPU 内存持续增长的问题，修复并运行现有检查
@@ -11,43 +11,47 @@ web3d › 检查模型切换后 GPU 内存持续增长的问题，修复并运�
                     ↑ 项目规则、执行权限与文件状态检查 ↑
 ```
 
-## 开始使用
+## 安装与首次配置
 
 需要 **Node.js 22 或更新版本**。Python 只在目标项目的后端任务需要时使用，CLI 本身不依赖 Python。
 
+发布到 npm 后，用户安装并启动命令。
+
 ```powershell
-cd E:\github\web3d-agent-cli
-npm install
-npm run build
-
-# 无密钥体验真实的工具执行闭环；模型部分是固定离线脚本
-npm start -- run "检查项目结构" --demo
-
-# 注册本机命令，之后可在其他项目使用 web3d-agent
-npm link
+npm install -g web3d-agent-cli
+web3d-agent
 ```
 
-连接兼容 OpenAI 的 Chat Completions 接口，模型必须支持 `tools` / `tool_calls`。Base URL 填 API 根地址，CLI 自动追加 `/chat/completions`，也接受已经带该后缀的地址。
+也可以直接运行 `npx web3d-agent-cli`。首次交互启动会打开模型向导，选择服务或自定义 API 地址，隐藏输入 API Key，再从接口返回的列表选择模型。接口提供方决定可用模型，选用支持 `tools` / `tool_calls` 的模型即可开始开发任务。模型列表暂不可用时，可以手动输入提供方的模型 ID。
+
+模型设置保存在用户目录的 `.web3d-agent/config.json`，之后进入其他项目时复用。聊天中可以调整模型和连接。
+
+```text
+/model                   从当前接口的模型列表选择
+/model your-model-id     直接切换模型 ID
+/setup                   修改接口地址和 API Key
+```
+
+独立运行 `web3d-agent setup` 也可以完成配置。切换后本轮立即应用，选择会保存为用户默认设置。环境变量和项目中显式指定的字段按下文优先级加载。
+
+密钥按 API 地址绑定存储。Windows 使用当前用户的 DPAPI 加密，macOS 优先使用钥匙串，Linux 优先使用 Secret Service。系统存储不可用时使用 AES-GCM 文件存储，主密钥与密文保存在用户目录并限制文件权限。文件回退的保护能力取决于该用户目录的访问权限。
+
+连接自定义服务时填写 API 根地址，程序会处理 `/chat/completions` 后缀。免认证接口可以留空 API Key。命令行、环境变量和项目配置仍适合脚本调用。
 
 ```powershell
-# 在你真正要开发的 Three.js / Python 项目中初始化
 web3d-agent init -C E:\github\your-web3d-project
-
-# 以下值替换成服务商提供的实际配置
-$env:WEB3D_BASE_URL = "https://your-provider.example/v1"
-$env:WEB3D_MODEL = "your-tool-calling-model"
-$env:WEB3D_API_KEY = "your-api-key"
-
 web3d-agent chat -C E:\github\your-web3d-project
-```
 
-本地免认证服务可以不设置密钥，例如 `--base-url http://localhost:11434/v1 --model <已安装且支持工具的模型>`。远程服务使用 HTTPS。CLI 不会自动读取 `.env`；密钥只从环境变量读取，不写进配置或会话。
+# 本地服务也可以直接指定
+web3d-agent run "检查场景资源销毁" --base-url http://localhost:11434/v1 --model your-model
+```
 
 ## 已实现的能力
 
 - DSH 驱动的模型与工具循环，工具串行执行，终止前等待当前执行收敛。
 - 交互式对话和单次任务；流式文本输出，工具参数完整组装后才执行。
 - 自定义模型、Base URL、密钥环境变量；可切换非流式 JSON。
+- 首次启动向导、接口模型列表、用户级默认设置和加密凭据存储，聊天内支持 `/model` 与 `/setup`。
 - DeepSeek 思考内容 `reasoning_content` 的 JSON / SSE 采集、历史回传和会话恢复。
 - 7 个内置工具：列目录、读文件、文字搜索、写文件、精确编辑、命令执行、项目启发式检查。
 - Three.js、Python 后端和通用工程三组内置规则，加上目标项目的 `AGENTS.md` 与补充规则。
@@ -152,7 +156,9 @@ your-project/
 }
 ```
 
-优先级为 **命令行 > `WEB3D_MODEL` / `WEB3D_BASE_URL` > 项目配置 > 默认值**。密钥优先读取 `apiKeyEnv` 指定变量，未设置时兼容 `OPENAI_API_KEY`。默认不选择付费模型；模型名需要自己配置。
+优先级为 **命令行 > `WEB3D_MODEL` / `WEB3D_BASE_URL` > 项目配置 > 用户默认设置 > 内置默认值**。密钥优先读取 `apiKeyEnv` 指定变量和 `OPENAI_API_KEY`，随后读取当前 API 地址绑定的保存凭据。`doctor --json` 会显示模型与接口配置的来源。
+
+新初始化的 `web3d-agent.json` 内容为 `{}`，需要项目专用设置时再添加字段。旧版初始化生成的完整默认模板会继承用户设置，并保留用户改过的项目参数。自动化环境可以通过 `WEB3D_CONFIG_DIR` 指定独立的用户配置目录。
 
 `contextChars` 是当前请求的字符预算，不是精确 token 数。超过预算时，只移出较早的完整用户轮次，并保留本地原始历史；不会使用模型摘要。当前单个任务也超过预算时会停止，避免破坏工具调用配对。可缩小任务、开始新会话或调整预算。
 
@@ -180,6 +186,9 @@ your-project/
 
 ```text
 /help                       查看会话命令
+/model                      从当前接口选择模型
+/model <模型ID>             切换并保存默认模型
+/setup                      配置 API 地址和密钥
 /rules                      查看已加载规则来源
 /status                     查看模型、模式和会话 ID
 /sessions                   列出本工作区会话
@@ -196,6 +205,11 @@ your-project/
 ## 开发与验证
 
 ```powershell
+cd E:\github\web3d-agent-cli
+npm ci
+npm run build
+npm start
+
 npm run dev -- --help
 npm run typecheck
 npm test
@@ -203,6 +217,8 @@ npm pack --dry-run
 ```
 
 测试覆盖真实 DSH 运行时中的工具调用配对、审批、取消、上下文边界，以及 SSE 工具参数分片、思考内容回传、接口截断、路径边界、文件过期、规则加载、会话恢复与 CLI 贯通。API 测试使用本机 HTTP 假服务。Windows 中创建文件符号链接需要权限，相应测试无法创建时明确跳过。目录 junction 边界另有测试。
+
+模型配置还验证了首次向导、模型切换、隐藏输入与取消后的恢复。Windows DPAPI 已在本机使用假密钥实际读写。macOS 钥匙串和 Linux Secret Service 的命令协议使用模拟执行器验证，对应系统实测待补充。
 
 本次挂载的 DSH 服务负责 Agent 循环、LLM、会话、投影、系统提示词和工具。终端可以通过批准后的命令运行目标项目自己的构建与测试。浏览器、WebGL 画面等验证以实际工具执行结果为准。
 

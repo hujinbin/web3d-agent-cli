@@ -11,7 +11,7 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function endpoint(baseUrl: string): string {
+export function completionEndpoint(baseUrl: string): string {
   let url: URL;
   try { url = new URL(baseUrl); } catch { throw new ProviderError('Base URL 必须是合法的绝对地址。'); }
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
@@ -196,7 +196,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   private readonly url: string;
 
   constructor(private readonly config: AgentConfig, private readonly apiKey?: string) {
-    this.url = endpoint(config.baseUrl);
+    this.url = completionEndpoint(config.baseUrl);
   }
 
   async complete(messages: Message[], tools: ToolDefinition[], signal: AbortSignal, onText?: (text: string) => void): Promise<Completion> {

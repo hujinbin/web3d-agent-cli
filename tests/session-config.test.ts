@@ -54,7 +54,9 @@ test('旧会话缺省思考字段仍可恢复，新会话保留空与非空思�
 test('配置遵循环境与显式覆盖顺序，拒绝非法数值和未知字段', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'web3d-config-'));
   const previous = process.env.WEB3D_MODEL;
+  const previousConfigDir = process.env.WEB3D_CONFIG_DIR;
   try {
+    process.env.WEB3D_CONFIG_DIR = path.join(root, 'user-settings');
     await writeFile(path.join(root, 'web3d-agent.json'), JSON.stringify({ model: 'project-model', maxSteps: 3 }));
     process.env.WEB3D_MODEL = 'env-model';
     assert.equal((await loadConfig(root)).model, 'env-model');
@@ -64,6 +66,7 @@ test('配置遵循环境与显式覆盖顺序，拒绝非法数值和未知字�
     await assert.rejects(loadConfig(root), /未知配置/);
   } finally {
     if (previous === undefined) delete process.env.WEB3D_MODEL; else process.env.WEB3D_MODEL = previous;
+    if (previousConfigDir === undefined) delete process.env.WEB3D_CONFIG_DIR; else process.env.WEB3D_CONFIG_DIR = previousConfigDir;
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -5,6 +5,9 @@ CLI 基于 DeepSeek Harness 的核心插件组合，使用兼容 OpenAI 的 Chat
 ```text
 cli.ts
   ├─ config.ts             配置优先级与参数校验
+  ├─ setup.ts              模型发现与首次配置向导
+  ├─ terminal.ts           终端提问、隐藏输入与历史处理
+  ├─ credentials.ts        按接口地址绑定的本机凭据
   ├─ rules/index.ts        内置规则 + 项目规则 → system prompt
   ├─ session.ts            用户轮次与配对工具消息的本地存储
   ├─ tools/project.ts      本地 check 与 check_project 的共享诊断
@@ -19,6 +22,10 @@ cli.ts
 ```
 
 ## 一次任务如何执行
+
+启动时按命令行、环境、项目、用户与内置默认值的顺序解析配置。交互环境缺少模型时先运行设置向导，再创建普通聊天任务。`/model` 和 `/setup` 在 CLI 层处理，设置输入直接交给用户配置及凭据模块。DSH 收到的是用户提交的开发任务。
+
+普通模型设置写入用户目录的 `.web3d-agent/config.json`，凭据使用规范化的最终 Chat Completions 地址绑定。Windows DPAPI、macOS 钥匙串和 Linux Secret Service 为系统存储路径，系统存储不可用时使用用户目录中的 AES-GCM 加密文件。密钥经标准输入交给系统进程。终端通过统一的 readline 输出通道隐藏输入，并在 history 事件中恢复输入前的历史。
 
 1. 创建本次任务的 Cordis Context，挂载 DSH 的模型、会话、投影、系统提示词、工具和 AgentLoop 服务。
 2. 将既有 Session v1 历史保留为请求前缀，当前任务通过 DSH 的 `followup()` 提交。

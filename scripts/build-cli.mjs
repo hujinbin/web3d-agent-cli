@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(path.join(root, 'package.json'));
 const harnessVersion = require('@deepseek-ai/dsh-agent-loop/package.json').version;
 const llmVersion = require('@deepseek-ai/dsh-llm/package.json').version;
+const appVersion = require(path.join(root, 'package.json')).version;
 const llmVersionLookup = 'createRequire(import.meta.url)("../package.json")';
 let patchedModules = 0;
 
@@ -23,7 +24,7 @@ const result = await build({
   minify: false,
   write: false,
   metafile: true,
-  define: { __WEB3D_DSH_VERSION__: JSON.stringify(harnessVersion) },
+  define: { __WEB3D_DSH_VERSION__: JSON.stringify(harnessVersion), __WEB3D_VERSION__: JSON.stringify(appVersion) },
   banner: {
     js: "import { createRequire as __web3dCreateRequire } from 'node:module';\nconst require = __web3dCreateRequire(import.meta.url);",
   },

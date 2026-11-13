@@ -35,7 +35,7 @@ test('CLI 初始化、JSONL 离线演示和会话恢复贯通', async () => {
     await launch('init');
     await writeFile(path.join(root, 'README.md'), '# Three.js / Python 项目');
     const config = JSON.parse(await readFile(path.join(root, 'web3d-agent.json'), 'utf8'));
-    assert.equal(config.model, '');
+    assert.equal(Object.hasOwn(config, 'model'), false);
     const result = await launch('run', '检查项目', '--demo', '--json');
     const events = result.stdout.trim().split('\n').map(line => JSON.parse(line));
     assert.equal(events.at(-1).reason, 'completed');
