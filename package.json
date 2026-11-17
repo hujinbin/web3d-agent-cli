@@ -2,6 +2,14 @@
   "name": "web3d-agent-cli",
   "version": "0.1.0",
   "description": "面向 Three.js 与 Python 后端的规则驱动编程智能体 CLI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hujinbin/web3d-agent-cli.git"
+  },
+  "homepage": "https://github.com/hujinbin/web3d-agent-cli#readme",
+  "bugs": {
+    "url": "https://github.com/hujinbin/web3d-agent-cli/issues"
+  },
   "type": "module",
   "bin": {
     "web3d-agent": "dist/src/cli.js"
